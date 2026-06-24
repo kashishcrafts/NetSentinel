@@ -71,7 +71,7 @@ class Alert(Base):
     incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=True)
     assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
     is_read = Column(Boolean, default=False)
-    metadata = Column(JSON, nullable=True)
+    record_metadata = Column("metadata", JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -111,13 +111,12 @@ class Incident(Base):
     threat_count = Column(Integer, default=0)
     alert_count = Column(Integer, default=0)
     evidence_count = Column(Integer, default=0)
-    metadata = Column(JSON, nullable=True)
+    record_metadata = Column("metadata", JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     assigned_user = relationship("User", back_populates="assigned_incidents")
     alerts = relationship("Alert", back_populates="incident")
-    threats = relationship("Threat", back_populates="incident")
     comments = relationship("IncidentComment", back_populates="incident", cascade="all, delete-orphan")
 
 
@@ -152,7 +151,7 @@ class IOC(Base):
     status = Column(String(50), default="active")
     source = Column(String(255), nullable=True)
     tags = Column(JSON, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    record_metadata = Column("metadata", JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -178,7 +177,7 @@ class ThreatIntelligence(Base):
     source = Column(String(255), nullable=True)
     malware_families = Column(JSON, nullable=True)
     iocs = Column(JSON, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    record_metadata = Column("metadata", JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -194,7 +193,7 @@ class MitreMapping(Base):
     technique_name = Column(String(255), nullable=False)
     subtechnique_id = Column(String(50), nullable=True)
     subtechnique_name = Column(String(255), nullable=True)
-    metadata = Column(JSON, nullable=True)
+    record_metadata = Column("metadata", JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -204,18 +203,35 @@ class AuditLog(Base):
         Index("idx_audit_user", "user_id"),
         Index("idx_audit_timestamp", "timestamp"),
         Index("idx_audit_action", "action"),
+        Index("idx_audit_status", "status"),
     )
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    username = Column(String(255), nullable=True)
+    role = Column(String(50), nullable=True)
     action = Column(String(100), nullable=False)
-    entity_type = Column(String(100), nullable=False)
-    entity_id = Column(Integer, nullable=False)
+    entity_type = Column(String(100), nullable=True)
+    entity_id = Column(Integer, nullable=True)
+    status = Column(String(20), default="success", nullable=False)
     old_value = Column(JSON, nullable=True)
     new_value = Column(JSON, nullable=True)
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(String(500), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+
+
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(100), unique=True, nullable=False, index=True)
+    value = Column(JSON, nullable=False)
+    description = Column(String(500), nullable=True)
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class NetworkFlow(Base):
@@ -238,7 +254,7 @@ class NetworkFlow(Base):
     anomaly_score = Column(Float, default=0.0)
     risk_score = Column(Float, default=0.0)
     timestamp = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    record_metadata = Column("metadata", JSON, nullable=True)
 
 
 class ModelVersion(Base):
@@ -255,4 +271,4 @@ class ModelVersion(Base):
     training_timestamp = Column(DateTime, default=datetime.utcnow)
     deployment_timestamp = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=False)
-    metadata = Column(JSON, nullable=True)
+    record_metadata = Column("metadata", JSON, nullable=True)

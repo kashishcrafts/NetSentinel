@@ -25,3 +25,4 @@ class Threat(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     
     creator = relationship("User", foreign_keys=[created_by])
+    alerts = relationship("Alert", back_populates="threat", foreign_keys="Alert.threat_id")

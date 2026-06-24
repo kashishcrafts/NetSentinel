@@ -180,17 +180,38 @@ class ThreatIntelligenceResponse(BaseModel):
 
 class AuditLogResponse(BaseModel):
     id: int
-    user_id: int
+    user_id: Optional[int]
+    username: Optional[str]
+    role: Optional[str]
     action: str
-    entity_type: str
-    entity_id: int
+    entity_type: Optional[str]
+    entity_id: Optional[int]
+    status: str
     old_value: Optional[Dict[str, Any]]
     new_value: Optional[Dict[str, Any]]
     ip_address: Optional[str]
+    user_agent: Optional[str]
     timestamp: datetime
 
     class Config:
         from_attributes = True
+
+
+class SystemSettingResponse(BaseModel):
+    id: int
+    key: str
+    value: Any
+    description: Optional[str]
+    updated_by: Optional[int]
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SystemSettingUpdate(BaseModel):
+    value: Any
+    description: Optional[str] = None
 
 
 class NetworkFlowCreate(BaseModel):

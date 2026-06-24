@@ -42,3 +42,13 @@ htmlcov/
 venv/
 env/
 ENV/
+node_modules/
+frontend/node_modules/
+
+*.log
+coverage/
+dist/
+build/
+
+.vscode/
+.cursor/

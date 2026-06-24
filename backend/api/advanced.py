@@ -1,25 +1,31 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
+
 from core.database import get_db
-from core.rbac import get_current_user
+from core.rbac import Resource, Action, require_permission, get_client_ip
+from core.security import decode_access_token
+from core.audit_actions import AuditAction
 from models.user import User
-from models.extended import ThreatIntelligence, MitreMapping, NetworkFlow
+from models.extended import ThreatIntelligence, NetworkFlow, IOC
 from services.threat_intelligence_service import ThreatIntelligenceService
+from services.audit_service import AuditService
 from ml.detection_engine import DetectionPipeline
 from network.sensor import NetworkSensor
-import json
+from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
 router = APIRouter(prefix="/api/v1", tags=["advanced"])
 
-# Global detection pipeline and sensor
 detection_pipeline = DetectionPipeline()
 network_sensor = NetworkSensor()
 
 
-# =======================
-# MITRE ATT&CK ENDPOINTS
-# =======================
+def _audit_meta(request: Request) -> dict:
+    return {
+        "ip_address": get_client_ip(request),
+        "user_agent": request.headers.get("User-Agent"),
+    }
+
 
 MITRE_FRAMEWORK = {
     "tactics": {
@@ -42,7 +48,7 @@ MITRE_FRAMEWORK = {
 @router.get("/mitre/tactics")
 def get_mitre_tactics(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.THREAT_INTEL, Action.READ)),
 ):
     """Get MITRE ATT&CK tactics matrix."""
     return {
@@ -55,15 +61,13 @@ def get_mitre_tactics(
 def get_tactic_details(
     tactic_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.THREAT_INTEL, Action.READ)),
 ):
     """Get tactic details with mapped threats."""
     tactic = MITRE_FRAMEWORK["tactics"].get(tactic_id)
     if not tactic:
         raise HTTPException(status_code=404, detail="Tactic not found")
-    
     threats = ThreatIntelligenceService.get_threats_by_tactic(db, tactic_id)
-    
     return {
         "tactic_id": tactic_id,
         "tactic_name": tactic["name"],
@@ -78,22 +82,29 @@ def map_threat_to_mitre(
     tactic_id: str,
     technique_id: str,
     technique_name: str,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.THREAT_INTEL, Action.UPDATE)),
 ):
     """Map threat to MITRE ATT&CK framework."""
     threat = ThreatIntelligenceService.get_threat_by_id(db, threat_id)
     if not threat:
         raise HTTPException(status_code=404, detail="Threat not found")
-    
     tactic = MITRE_FRAMEWORK["tactics"].get(tactic_id)
     if not tactic:
         raise HTTPException(status_code=404, detail="Tactic not found")
-    
     mapping = ThreatIntelligenceService.add_mitre_mapping(
         db, threat_id, tactic_id, tactic["name"], technique_id, technique_name
     )
-    
+    AuditService.log_from_user(
+        db,
+        current_user,
+        AuditAction.THREAT_UPDATE.value,
+        entity_type="ThreatIntelligence",
+        entity_id=threat_id,
+        new_value={"tactic_id": tactic_id, "technique_id": technique_id},
+        **_audit_meta(request),
+    )
     return {
         "mapping_id": mapping.id,
         "threat_id": threat_id,
@@ -105,7 +116,7 @@ def map_threat_to_mitre(
 @router.get("/mitre/attack-matrix")
 def get_attack_matrix(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.THREAT_INTEL, Action.READ)),
 ):
     """Get attack matrix view of all tactics and techniques."""
     matrix = {}
@@ -115,33 +126,23 @@ def get_attack_matrix(
             "techniques": tactic_data["techniques"],
             "threat_count": len(ThreatIntelligenceService.get_threats_by_tactic(db, tactic_id)),
         }
-    
     return {"matrix": matrix}
 
-
-# =======================
-# THREAT HUNTING ENDPOINTS
-# =======================
 
 @router.post("/threat-hunting/search-ip")
 def hunt_by_ip(
     ip: str,
     time_range_hours: int = Query(24),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.DETECTION, Action.EXECUTE)),
 ):
     """Hunt threats by IP address."""
-    from datetime import datetime, timedelta
-    
     time_threshold = datetime.utcnow() - timedelta(hours=time_range_hours)
-    
     flows = db.query(NetworkFlow).filter(
         (NetworkFlow.source_ip == ip) | (NetworkFlow.destination_ip == ip),
-        NetworkFlow.timestamp >= time_threshold
+        NetworkFlow.timestamp >= time_threshold,
     ).order_by(NetworkFlow.timestamp.desc()).all()
-    
     suspicious_flows = [f for f in flows if f.anomaly_score > 0.7 or f.risk_score > 70]
-    
     return {
         "searched_ip": ip,
         "total_flows": len(flows),
@@ -165,15 +166,10 @@ def hunt_by_ip(
 def hunt_by_domain(
     domain: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.DETECTION, Action.EXECUTE)),
 ):
     """Hunt threats by domain."""
-    from models.extended import IOC
-    
-    iocs = db.query(IOC).filter(
-        IOC.value.ilike(f"%{domain}%")
-    ).all()
-    
+    iocs = db.query(IOC).filter(IOC.value.ilike(f"%{domain}%")).all()
     return {
         "searched_domain": domain,
         "ioc_count": len(iocs),
@@ -194,19 +190,12 @@ def hunt_by_domain(
 def hunt_by_hash(
     file_hash: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.DETECTION, Action.EXECUTE)),
 ):
     """Hunt threats by file hash."""
-    from models.extended import IOC
-    
-    ioc = db.query(IOC).filter(
-        IOC.value == file_hash,
-        IOC.ioc_type == "hash"
-    ).first()
-    
+    ioc = db.query(IOC).filter(IOC.value == file_hash, IOC.ioc_type == "hash").first()
     if not ioc:
         return {"hash": file_hash, "found": False, "message": "Hash not in database"}
-    
     return {
         "hash": file_hash,
         "found": True,
@@ -218,66 +207,87 @@ def hunt_by_hash(
     }
 
 
-# =======================
-# DETECTION PIPELINE ENDPOINTS
-# =======================
-
 @router.post("/detection/analyze-flow")
 def analyze_network_flow(
     flow_data: Dict[str, Any],
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.DETECTION, Action.EXECUTE)),
 ):
     """Analyze network flow through detection pipeline."""
     result = detection_pipeline.process_network_flow(flow_data)
+    AuditService.log_from_user(
+        db,
+        current_user,
+        AuditAction.DETECTION_EXECUTE.value,
+        entity_type="Detection",
+        new_value={"flow_source": flow_data.get("source_ip")},
+        **_audit_meta(request),
+    )
     return result
 
 
 @router.post("/detection/batch-analyze")
 def batch_analyze_flows(
     flows: List[Dict[str, Any]],
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.DETECTION, Action.EXECUTE)),
 ):
     """Analyze multiple flows."""
-    results = []
-    for flow in flows:
-        result = detection_pipeline.process_network_flow(flow)
-        results.append(result)
-    
-    return {
-        "total_analyzed": len(flows),
-        "results": results,
-    }
+    results = [detection_pipeline.process_network_flow(flow) for flow in flows]
+    AuditService.log_from_user(
+        db,
+        current_user,
+        AuditAction.DETECTION_EXECUTE.value,
+        entity_type="Detection",
+        new_value={"batch_size": len(flows)},
+        **_audit_meta(request),
+    )
+    return {"total_analyzed": len(flows), "results": results}
 
 
 @router.get("/detection/sensor-stats")
 def get_sensor_stats(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Resource.DETECTION, Action.READ)),
 ):
     """Get network sensor statistics."""
     return network_sensor.get_sensor_stats()
 
 
-# =======================
-# REAL-TIME WEBSOCKET ENDPOINTS
-# =======================
+async def _authenticate_websocket(websocket: WebSocket, db: Session) -> User | None:
+    """Validate Bearer token on WebSocket connection."""
+    auth = websocket.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.startswith("Bearer ") else websocket.query_params.get("token")
+    if not token:
+        return None
+    payload = decode_access_token(token)
+    if not payload or not payload.get("sub"):
+        return None
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if not user or not user.is_active:
+        return None
+    return user
+
 
 @router.websocket("/ws/live-threats")
 async def websocket_live_threats(websocket: WebSocket, db: Session = Depends(get_db)):
-    """WebSocket for live threat updates."""
+    """WebSocket for live threat updates (authenticated)."""
+    user = await _authenticate_websocket(websocket, db)
+    if not user:
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     try:
+        import asyncio
+        from models.extended import Alert, AlertPriority, AlertStatus
+
         while True:
-            # Send critical alerts every 5 seconds
-            from services.alert_service import AlertService
-            import asyncio
-            
-            critical_alerts = db.query(AlertService).filter(
-                AlertService.priority == "critical"
+            critical_alerts = db.query(Alert).filter(
+                Alert.priority == AlertPriority.CRITICAL,
+                Alert.status == AlertStatus.OPEN,
             ).limit(10).all()
-            
             await websocket.send_json({
                 "type": "threat_update",
                 "count": len(critical_alerts),
@@ -291,7 +301,6 @@ async def websocket_live_threats(websocket: WebSocket, db: Session = Depends(get
                     for a in critical_alerts
                 ],
             })
-            
             await asyncio.sleep(5)
     except WebSocketDisconnect:
         pass
@@ -299,20 +308,22 @@ async def websocket_live_threats(websocket: WebSocket, db: Session = Depends(get
 
 @router.websocket("/ws/live-incidents")
 async def websocket_live_incidents(websocket: WebSocket, db: Session = Depends(get_db)):
-    """WebSocket for live incident updates."""
+    """WebSocket for live incident updates (authenticated)."""
+    user = await _authenticate_websocket(websocket, db)
+    if not user:
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     try:
+        import asyncio
+        from services.incident_service import IncidentService
+
         while True:
-            from services.incident_service import IncidentService
-            import asyncio
-            
             active_incidents = IncidentService.get_active_incidents_count(db)
-            
             await websocket.send_json({
                 "type": "incident_update",
                 "active_count": active_incidents,
             })
-            
             await asyncio.sleep(10)
     except WebSocketDisconnect:
         pass

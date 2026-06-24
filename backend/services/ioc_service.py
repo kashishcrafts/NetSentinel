@@ -21,7 +21,7 @@ class IOCService:
             confidence=ioc.confidence,
             source=ioc.source,
             tags=ioc.tags,
-            metadata=ioc.metadata,
+            record_metadata=ioc.metadata,
         )
         db.add(db_ioc)
         db.commit()

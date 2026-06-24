@@ -21,7 +21,7 @@ class AlertService:
             destination_ip=alert.destination_ip,
             protocol=alert.protocol,
             threat_id=alert.threat_id,
-            metadata=alert.metadata,
+            record_metadata=alert.metadata,
         )
         db.add(db_alert)
         db.commit()
@@ -146,33 +146,12 @@ class AlertService:
     def get_recent_alerts(db: Session, hours: int = 24) -> List[Alert]:
         time_threshold = datetime.utcnow() - timedelta(hours=hours)
         return db.query(Alert).filter(Alert.created_at >= time_threshold).order_by(Alert.created_at.desc()).all()
-        
-        for field, value in update_data.items():
-            setattr(db_alert, field, value)
-        
-        db.add(db_alert)
-        db.commit()
-        db.refresh(db_alert)
-        return db_alert
-    
+
     @staticmethod
     def delete_alert(db: Session, alert_id: int) -> bool:
         db_alert = AlertService.get_alert_by_id(db, alert_id)
         if not db_alert:
             return False
-        
         db.delete(db_alert)
         db.commit()
         return True
-    
-    @staticmethod
-    def mark_as_read(db: Session, alert_id: int) -> Optional[Alert]:
-        db_alert = AlertService.get_alert_by_id(db, alert_id)
-        if not db_alert:
-            return None
-        
-        db_alert.is_read = True
-        db.add(db_alert)
-        db.commit()
-        db.refresh(db_alert)
-        return db_alert
